@@ -588,6 +588,7 @@ probabilistic seismic damage and risk analyses:
 - Reinsurance
 - ScenarioDamage
 - ScenarioRisk
+- ScenarioRiskZOIB
 
 Several building-risk demos use Nepal as the region of interest. Their example
 exposure contains 9,063 assets distributed among 2,221 locations. A map of
