@@ -1,0 +1,3 @@
+#,,,,"generated_by='OpenQuake engine 3.27.0-gitdfe2dfa539', start_date='2026-10-22T15:30:33', checksum=3281867613, kind='mean', risk_investigation_time=50.0"
+asset_id,taxonomy,lon,lat,structural~poe-0.01
+a1,VF,1.00000,1.00000,2.28757E-01

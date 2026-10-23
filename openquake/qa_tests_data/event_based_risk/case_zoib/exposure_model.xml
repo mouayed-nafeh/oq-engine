@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<nrml xmlns="http://openquake.org/xmlns/nrml/0.5">
+  <exposureModel id="exp" category="buildings">
+    <description>exposure for the ZOIB tests</description>
+    <conversions>
+      <costTypes>
+        <costType name="structural" type="per_asset" unit="USD"/>
+      </costTypes>
+    </conversions>
+    <assets>
+      <asset id="a1" number="1" taxonomy="RC">
+        <location lon="-122.0000" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a2" number="1" taxonomy="RC">
+        <location lon="-121.9556" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a3" number="1" taxonomy="RC">
+        <location lon="-121.9111" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a4" number="1" taxonomy="RC">
+        <location lon="-121.8667" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a5" number="1" taxonomy="RC">
+        <location lon="-121.8222" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a6" number="1" taxonomy="RC">
+        <location lon="-121.7778" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a7" number="1" taxonomy="RC">
+        <location lon="-121.7333" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a8" number="1" taxonomy="RC">
+        <location lon="-121.6889" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a9" number="1" taxonomy="RC">
+        <location lon="-121.6444" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a10" number="1" taxonomy="RC">
+        <location lon="-121.6000" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+    </assets>
+  </exposureModel>
+</nrml>

@@ -16,9 +16,12 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with OpenQuake. If not, see <http://www.gnu.org/licenses/>.
 
+import os
 import numpy
+from scipy import stats
 from openquake.baselib.general import gettemp
-from openquake.hazardlib import InvalidFile
+from openquake.hazardlib import InvalidFile, nrml
+from openquake.risklib.scientific import _alpha_beta
 from openquake.hazardlib.gsim_lt import InvalidLogicTree
 from openquake.calculators.tests import CalculatorTestCase, strip_calc_id
 from openquake.calculators.views import view, text_table
@@ -28,7 +31,7 @@ from openquake.qa_tests_data.scenario_risk import (
     case_1, case_2, case_2d, case_1g, case_1h, case_3, case_4, case_5,
     case_6a, case_7, case_8, case_9, case_10, case_11, case_12, case_13,
     occupants, case_master, case_shakemap, case_shapefile, reinsurance,
-    conditioned)
+    conditioned, case_zoib)
 
 
 aac = numpy.testing.assert_allclose
@@ -36,6 +39,43 @@ aac = numpy.testing.assert_allclose
 
 def tot_loss(dstore):
     return dstore.read_df('aggrisk').loss.sum() / 2
+
+
+def zoib_to_pm(fname, nbins=200):
+    """
+    Discretise the ZOIB vulnerability functions in `fname` into PM
+    functions with loss ratios 0, 1 and the midpoints of `nbins` bins
+    of equal width in (0, 1).
+
+    :returns: the path of the generated PM vulnerability file
+    """
+    vmodel = nrml.to_python(fname)
+    edges = numpy.linspace(0, 1, nbins + 1)
+    lrs = numpy.concatenate([[0], (edges[1:] + edges[:-1]) / 2, [1]])
+    funcs = []
+    for (imt, vf_id), vf in vmodel.items():
+        vf.init()
+        probs = numpy.zeros((nbins + 2, len(vf.imls)))
+        probs[0] = vf.probs_zero
+        probs[-1] = vf.probs_one
+        for i, (mu, cov) in enumerate(zip(vf._mus, vf._icovs)):
+            pint = 1 - vf.probs_zero[i] - vf.probs_one[i]
+            cdf = stats.beta.cdf(edges, *_alpha_beta(mu, mu * cov))
+            probs[1:-1, i] = pint * numpy.diff(cdf)
+        rows = ''.join('<probabilities lr="%.6f">%s</probabilities>\n' % (
+            lr, ' '.join('%.8f' % p for p in row))
+            for lr, row in zip(lrs, probs))
+        funcs.append('<vulnerabilityFunction id="%s" dist="PM">\n'
+                     '<imls imt="%s">%s</imls>\n%s</vulnerabilityFunction>'
+                     % (vf_id, imt, ' '.join(map(str, vf.imls)), rows))
+    return gettemp('''<?xml version="1.0" encoding="UTF-8"?>
+<nrml xmlns="http://openquake.org/xmlns/nrml/0.5">
+<vulnerabilityModel id="pm" assetCategory="buildings"
+                    lossCategory="%s">
+<description>ZOIB model discretised to PM</description>
+%s
+</vulnerabilityModel>
+</nrml>''' % (vmodel.lossCategory, '\n'.join(funcs)), suffix='.xml')
 
 
 class ScenarioRiskTestCase(CalculatorTestCase):
@@ -142,6 +182,64 @@ class ScenarioRiskTestCase(CalculatorTestCase):
                             exports='csv')
         [_tot, fname] = out['aggrisk', 'csv']
         self.assertEqualFiles('expected/agg-gsimltp_@.csv', fname)
+
+    def test_case_zoib(self):
+        # vulnerability function with a zero-one-inflated Beta
+        out = self.run_calc(case_zoib.__file__, 'job.ini', exports='csv')
+        [fname] = out['avg_losses-rlzs', 'csv']
+        self.assertEqualFiles('expected/avg_losses.csv', fname)
+        [fname] = out['aggrisk', 'csv']
+        self.assertEqualFiles('expected/aggrisk.csv', fname)
+
+        # the exported vulnerability model is the input one
+        [fname] = export(('vulnerability', 'xml'), self.calc.datastore)
+        [vf0] = nrml.to_python(os.path.join(
+            self.testdir, 'structural_vulnerability_model.xml')).values()
+        [vf1] = nrml.to_python(fname).values()
+        for attr in ('imls', 'interior_means', 'interior_covs',
+                     'probs_zero', 'probs_one'):
+            aac(getattr(vf1, attr), getattr(vf0, attr))
+
+    def test_case_zoib_correl(self):
+        # ZOIB with full asset correlation: same average losses as the
+        # deterministic calculation, more dispersed event losses
+        def run(**kw):
+            self.run_calc(case_zoib.__file__, 'job.ini', **kw)
+            dstore = self.calc.datastore
+            alt = dstore.read_df('risk_by_event')
+            alt = alt[alt.agg_id == alt.agg_id.max()]
+            losses = numpy.zeros(len(dstore['events']))
+            losses[alt.event_id.to_numpy()] = alt.loss.to_numpy()
+            avg = dstore['avg_losses-rlzs/structural'][:, 0].sum()
+            return avg, losses, alt.variance.to_numpy()
+
+        avg, losses, variance = run(asset_correlation='1', exports='csv')
+        [fname] = export(('avg_losses-rlzs', 'csv'), self.calc.datastore)
+        self.assertEqualFiles('expected/avg_losses_correl.csv', fname)
+        avg0, losses0, _ = run(ignore_covs='true')
+        se = numpy.sqrt(variance.sum()) / len(losses)
+        self.assertLess(abs(avg - avg0), 4 * se)
+        _, losses_uncorrel, variance_uncorrel = run()
+        self.assertGreater(losses.std(), 1.2 * losses_uncorrel.std())
+        # the aggregated variance is (sum sigma)^2 instead of sum sigma^2
+        self.assertGreater(variance.mean(), 4 * variance_uncorrel.mean())
+
+    def test_case_zoib_vs_pm(self):
+        # the same model discretised to PM gives the same average losses;
+        # since the PM sampling uses the same random number for all the
+        # assets of an event a single asset is considered, with many events
+        region = '-122.01 38.10, -121.99 38.10, -121.99 38.12, -122.01 38.12'
+        kw = dict(region=region, number_of_ground_motion_fields='20000')
+        self.run_calc(case_zoib.__file__, 'job.ini', **kw)
+        zoib = self.calc.datastore['avg_losses-rlzs/structural'][:, 0]
+        self.assertEqual(len(zoib), 1)
+        pm_file = zoib_to_pm(os.path.join(
+            self.testdir, 'structural_vulnerability_model.xml'))
+        self.run_calc(case_zoib.__file__, 'job.ini', **kw,
+                      structural_vulnerability_file=os.path.relpath(
+                          pm_file, self.testdir))
+        pm = self.calc.datastore['avg_losses-rlzs/structural'][:, 0]
+        aac(pm, zoib, rtol=.02)
 
     def test_case_1h(self):
         # this is a case with 2 assets spawning 2 tasks

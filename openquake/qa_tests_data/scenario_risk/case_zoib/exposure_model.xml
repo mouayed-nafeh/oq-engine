@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<nrml xmlns="http://openquake.org/xmlns/nrml/0.5">
+  <exposureModel id="exp" category="buildings">
+    <description>exposure for the ZOIB tests</description>
+    <conversions>
+      <costTypes>
+        <costType name="structural" type="per_asset" unit="USD"/>
+      </costTypes>
+    </conversions>
+    <assets>
+      <asset id="a1" number="1" taxonomy="RC">
+        <location lon="-122.0000" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a2" number="1" taxonomy="RC">
+        <location lon="-121.9789" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a3" number="1" taxonomy="RC">
+        <location lon="-121.9579" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a4" number="1" taxonomy="RC">
+        <location lon="-121.9368" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a5" number="1" taxonomy="RC">
+        <location lon="-121.9158" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a6" number="1" taxonomy="RC">
+        <location lon="-121.8947" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a7" number="1" taxonomy="RC">
+        <location lon="-121.8737" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a8" number="1" taxonomy="RC">
+        <location lon="-121.8526" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a9" number="1" taxonomy="RC">
+        <location lon="-121.8316" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a10" number="1" taxonomy="RC">
+        <location lon="-121.8105" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a11" number="1" taxonomy="RC">
+        <location lon="-121.7895" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a12" number="1" taxonomy="RC">
+        <location lon="-121.7684" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a13" number="1" taxonomy="RC">
+        <location lon="-121.7474" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a14" number="1" taxonomy="RC">
+        <location lon="-121.7263" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a15" number="1" taxonomy="RC">
+        <location lon="-121.7053" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a16" number="1" taxonomy="RC">
+        <location lon="-121.6842" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a17" number="1" taxonomy="RC">
+        <location lon="-121.6632" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a18" number="1" taxonomy="RC">
+        <location lon="-121.6421" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a19" number="1" taxonomy="RC">
+        <location lon="-121.6211" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+      <asset id="a20" number="1" taxonomy="RC">
+        <location lon="-121.6000" lat="38.1130"/>
+        <costs><cost type="structural" value="10000"/></costs>
+      </asset>
+    </assets>
+  </exposureModel>
+</nrml>

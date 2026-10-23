@@ -35,7 +35,7 @@ from openquake.qa_tests_data.event_based_risk import (
     case_01, case_02, case_03, case_04, case_4a, case_05, case_6c, case_master,
     case_miriam, occupants, case_1f, case_1g, case_7a, case_08, case_09,
     recompute, reinsurance_1, reinsurance_2, reinsurance_3,
-    reinsurance_4, reinsurance_5)
+    reinsurance_4, reinsurance_5, case_zoib)
 
 aac = numpy.testing.assert_allclose
 
@@ -207,6 +207,29 @@ agg_id
         [fname] = export(('avg_losses-rlzs', 'csv'), self.calc.datastore)
         self.assertEqualFiles('expected/avg_losses.csv', fname)
         os.remove(fname)
+
+    def test_case_zoib(self):
+        # vulnerability function with a zero-one-inflated Beta
+        self.run_calc(case_zoib.__file__, 'job_h.ini,job_r.ini')
+        [fname] = export(('avg_losses-rlzs', 'csv'), self.calc.datastore)
+        self.assertEqualFiles('expected/avg_losses.csv', fname)
+        os.remove(fname)
+        [fname] = export(('aggrisk', 'csv'), self.calc.datastore)
+        self.assertEqualFiles('expected/aggrisk.csv', fname)
+        os.remove(fname)
+
+        # the sampled losses are statistically consistent with the mean
+        # losses computed without sampling (ignore_covs=true)
+        alt = self.calc.datastore.read_df('risk_by_event')
+        tot = alt[alt.agg_id == alt.agg_id.max()]
+        mean = self.calc.datastore['avg_losses-rlzs/structural'][:].sum()
+        self.run_calc(case_zoib.__file__, 'job_h.ini,job_r.ini',
+                      ignore_covs='true')
+        mean0 = self.calc.datastore['avg_losses-rlzs/structural'][:].sum()
+        # standard error of the total loss from the variance column
+        E = len(self.calc.datastore['events'])
+        se = numpy.sqrt(tot.variance.sum()) / E
+        self.assertLess(abs(mean - mean0), 4 * se)
 
     def test_case_02(self):
         self.run_calc(case_02.__file__, 'job.ini', concurrent_tasks='0')

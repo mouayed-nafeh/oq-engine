@@ -17,7 +17,8 @@
 # along with OpenQuake. If not, see <http://www.gnu.org/licenses/>.
 
 from openquake.qa_tests_data.classical_risk import (
-    case_1, case_2, case_3, case_4, case_5, case_lisa, case_master)
+    case_1, case_2, case_3, case_4, case_5, case_lisa, case_master,
+    case_zoib)
 from openquake.calculators.tests import CalculatorTestCase, strip_calc_id
 from openquake.calculators.export import export
 from openquake.baselib import InvalidFile
@@ -39,6 +40,24 @@ class ClassicalRiskTestCase(CalculatorTestCase):
 
         [fname] = export(('avg_losses-stats', 'csv'), self.calc.datastore)
         self.assertEqualFiles('expected/avg_losses-mean.csv', fname)
+
+    def test_case_zoib(self):
+        # vulnerability function with a zero-one-inflated Beta
+        self.run_calc(case_zoib.__file__, 'job.ini')
+        [fname] = export(('loss_curves/rlz-0', 'csv'), self.calc.datastore)
+        self.assertEqualFiles('expected/loss_curves.csv', fname)
+        [fname] = export(('loss_maps-stats', 'csv'), self.calc.datastore)
+        self.assertEqualFiles('expected/loss_maps.csv', fname)
+        [fname] = export(('avg_losses-stats', 'csv'), self.calc.datastore)
+        self.assertEqualFiles('expected/avg_losses-mean.csv', fname)
+
+        # without point masses the ZOIB reduces to the BT of case_2
+        self.run_calc(case_zoib.__file__, 'job.ini',
+                      structural_vulnerability_file='vulnerability_bt.xml')
+        [fname] = export(('loss_curves/rlz-0', 'csv'), self.calc.datastore)
+        self.assertEqualFiles('../case_2/expected/loss_curves.csv', fname)
+        [fname] = export(('avg_losses-stats', 'csv'), self.calc.datastore)
+        self.assertEqualFiles('../case_2/expected/avg_losses-mean.csv', fname)
 
     def test_prob_above1(self):
         with self.assertRaises(InvalidFile) as ctx:
