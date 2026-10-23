@@ -158,6 +158,12 @@ class Sampler(object):
     def sampleBT(self, rng, dic):
         return rng.beta(dic['eid'], dic['mean'], dic['cov'])
 
+    def sampleZOIB(self, rng, dic):
+        # p0, p1, imean and icov are the zero/one masses and the
+        # interior Beta parameters, see VulnerabilityFunctionWithZOIB
+        return rng.zoib(dic['eid'], dic['p0'], dic['p1'],
+                        dic['imean'], dic['icov'])
+
     def samplePM(self, rng, dic):
         # in case_1g self.cols = [0, 1, 2, 3, 4, 5, 6], len(dic)=4
         eids = dic['eid']
@@ -195,7 +201,8 @@ class VulnerabilityFunction(object):
         (currently, the Log-normal ("LN") and Beta ("BT")
         distributions are supported amongst the continuous probability
         distributions. For specifying a discrete probability
-        distribution refer to the class VulnerabilityFunctionWithPMF.
+        distribution refer to the class VulnerabilityFunctionWithPMF,
+        for a zero-one-inflated Beta to VulnerabilityFunctionWithZOIB.
         It is meant to be pickeable to allow distributed computation.
         The only important method is `.__call__`, which applies
         the vulnerability function to a given set of ground motion
@@ -324,16 +331,19 @@ class VulnerabilityFunction(object):
         losses = self.sampler.get_losses(rng, dic, covs)
         ok = losses > minloss
         losses_ok = losses[ok]
-        if self.distribution_name == 'PM':  # special case
-            variances_ok = numpy.zeros(len(losses_ok))
-        else:
-            covs_ok = dic['cov'][ok]
-            variances_ok = (losses_ok * covs_ok) ** 2
+        variances_ok = self._variances(dic, losses_ok, ok)
         return pandas.DataFrame(
             dict(eid=dic['eid'][ok],
                  aid=dic['aid'][ok],
                  variance=variances_ok,
                  loss=losses_ok))
+
+    def _variances(self, dic, losses_ok, ok):
+        # variances of the losses above the minimum loss, used in __call__
+        if self.distribution_name == 'PM':  # special case
+            return numpy.zeros(len(losses_ok))
+        covs_ok = dic['cov'][ok]
+        return (losses_ok * covs_ok) ** 2
 
     def strictly_increasing(self):
         """
@@ -553,6 +563,253 @@ class VulnerabilityFunctionWithPMF(VulnerabilityFunction):
 
     def __repr__(self):
         return '<VulnerabilityFunctionWithPMF(%s, %s)>' % (self.id, self.imt)
+
+
+PINT_MIN = 1E-12  # below this interior probability mu and cov are ignored
+PSUM_TOL = 1E-9  # tolerance on the check probZero + probOne <= 1
+
+
+def zoib_moments(p0, p1, mu, cov):
+    """
+    :param p0: probabilities of a loss ratio exactly 0
+    :param p1: probabilities of a loss ratio exactly 1
+    :param mu: means of the interior Beta distribution
+    :param cov: coefficients of variation of the interior Beta
+    :returns: overall mean and variance of the zero-one-inflated Beta
+
+    >>> [round(float(x), 4) for x in zoib_moments(.2, .1, .5, 0.)]
+    [0.45, 0.0725]
+    """
+    pint = 1. - p0 - p1
+    mean = p1 + pint * mu
+    mom2 = p1 + pint * (mu ** 2 + (mu * cov) ** 2)
+    return mean, numpy.maximum(mom2 - mean ** 2, 0.)
+
+
+def _clip_cov(mu, cov):
+    # make sure that cov**2 < 1 / mu - 1, as required by the Beta
+    # distribution; this is needed since the condition is not preserved
+    # by the linear interpolation in the IMLs
+    maxcov = numpy.sqrt(numpy.maximum(1. / mu - 1., 0.) * (1. - 1E-9))
+    return numpy.minimum(cov, maxcov)
+
+
+class VulnerabilityFunctionWithZOIB(VulnerabilityFunction):
+    """
+    Vulnerability function with a zero-one-inflated Beta (ZOIB)
+    distribution of the loss ratio Y: at each IML Y is exactly 0 with
+    probability p0, exactly 1 with probability p1 and otherwise Beta
+    distributed with mean mu and coefficient of variation cov.
+
+    :param str vf_id: vulnerability function ID
+    :param str imt: Intensity Measure Type
+    :param imls: intensity measure levels (L)
+    :param mean_loss_ratios: L means of the interior Beta (0 < Y < 1)
+    :param covs: L coefficients of variation of the interior Beta
+    :param probs_zero: L probabilities p0 of a loss ratio exactly 0
+    :param probs_one: L probabilities p1 of a loss ratio exactly 1
+
+    The attributes `.mean_loss_ratios` and `.covs` contain the OVERALL
+    mean and coefficient of variation of Y, so that the methods of the
+    parent class (mean_loss_ratios_with_steps, mean_imls, _cov_for, ...)
+    work unchanged; the interior parameters are stored in the attributes
+    `.interior_means` and `.interior_covs`.
+    """
+    def __init__(self, vf_id, imt, imls, mean_loss_ratios, covs,
+                 probs_zero, probs_one):
+        self.id = vf_id
+        self.imt = imt
+        self.retro = False
+        self.distribution_name = 'ZOIB'
+        self.imls = F64(imls)
+        self.interior_means = F64(mean_loss_ratios)
+        self.interior_covs = F64(covs)
+        self.probs_zero = F64(probs_zero)
+        self.probs_one = F64(probs_one)
+        self._check_vulnerability_data()
+        mean, var = zoib_moments(
+            self.probs_zero, self.probs_one, self.interior_means,
+            self.interior_covs)
+        self.mean_loss_ratios = mean
+        self.covs = numpy.divide(numpy.sqrt(var), mean,
+                                 out=numpy.zeros_like(mean), where=mean > 0)
+
+    def _check_vulnerability_data(self):
+        imls = self.imls
+        p0, p1 = self.probs_zero, self.probs_one
+        mu, cov = self.interior_means, self.interior_covs
+        L = len(imls)
+        if L < 2:
+            raise ValueError('%s: at least 2 IMLs are required' % self.id)
+        for name, arr in [('meanLRs', mu), ('covLRs', cov),
+                          ('probZero', p0), ('probOne', p1)]:
+            if len(arr) != L:
+                raise ValueError('%s: there are %d %s, but %d imls' % (
+                    self.id, len(arr), name, L))
+            if not numpy.isfinite(arr).all():
+                raise ValueError('%s: non-finite values in %s: %s' % (
+                    self.id, name, arr))
+        if (imls < 0).any() or (numpy.diff(imls) <= 0).any():
+            raise ValueError('%s: the IMLs must be non-negative and strictly '
+                             'increasing, got %s' % (self.id, imls))
+        if (p0 < 0).any() or (p1 < 0).any():
+            raise ValueError('%s: negative probabilities in probZero=%s or '
+                             'probOne=%s' % (self.id, p0, p1))
+        bad = p0 + p1 > 1. + PSUM_TOL
+        if bad.any():
+            raise ValueError('%s: probZero + probOne > 1 at IML=%s' % (
+                self.id, imls[bad][0]))
+        inner = 1. - p0 - p1 > PINT_MIN  # IMLs with an interior Beta
+        m, c = mu[inner], cov[inner]
+        if ((m <= 0) | (m >= 1)).any():
+            raise ValueError('%s: the meanLRs must be in the range (0, 1) '
+                             'where probZero + probOne < 1, got %s' % (
+                                 self.id, m))
+        if (c < 0).any():
+            raise ValueError('%s: negative covLRs %s' % (self.id, c))
+        bad = c ** 2 >= 1. / m - 1.
+        if bad.any():
+            raise ValueError(
+                '%s: the coefficient of variation %s >= %s does not '
+                'satisfy the requirement 0 < sig < sqrt[mu × (1 - mu)] '
+                'at IML=%s' % (self.id, c[bad][0],
+                               numpy.sqrt(1. / m[bad][0] - 1.),
+                               imls[inner][bad][0]))
+
+    def init(self):
+        # called by CompositeRiskModel and by __setstate__
+        for name in ('imls', 'mean_loss_ratios', 'covs', 'interior_means',
+                     'interior_covs', 'probs_zero', 'probs_one'):
+            setattr(self, name, F64(getattr(self, name)))
+        self._stddevs = self.covs * self.mean_loss_ratios
+        # the interior mean and cov are meaningless at the IMLs where
+        # probZero + probOne = 1: there we interpolate between the
+        # neighbouring IMLs with an interior Beta
+        inner = 1. - self.probs_zero - self.probs_one > PINT_MIN
+        if inner.any():
+            self._mus = numpy.interp(
+                self.imls, self.imls[inner], self.interior_means[inner])
+            self._icovs = _clip_cov(self._mus, numpy.interp(
+                self.imls, self.imls[inner], self.interior_covs[inner]))
+        else:  # dummy values, the interior is never used
+            self._mus = numpy.full_like(self.imls, .5)
+            self._icovs = numpy.zeros_like(self.imls)
+        self.sampler = Sampler(self.distribution_name)
+
+    def interpolate_params(self, imls):
+        """
+        :param imls: an array of IMLs in the range of the function
+        :returns: arrays p0, p1, mu, cov interpolated linearly in the IMLs
+        """
+        p0 = numpy.clip(numpy.interp(imls, self.imls, self.probs_zero), 0, 1)
+        p1 = numpy.clip(
+            numpy.interp(imls, self.imls, self.probs_one), 0, 1 - p0)
+        mu = numpy.interp(imls, self.imls, self._mus)
+        cov = _clip_cov(mu, numpy.interp(imls, self.imls, self._icovs))
+        return p0, p1, mu, cov
+
+    def interpolate(self, gmf_df, col):
+        """
+        :param gmf_df:
+           DataFrame of GMFs
+        :returns:
+           DataFrame with the overall mean and cov of the loss ratios and
+           with the ZOIB parameters p0, p1, imean, icov
+        """
+        gmvs = gmf_df[col].to_numpy()
+        N = len(gmvs)
+        dic = dict(eid=gmf_df.eid.to_numpy(), mean=numpy.zeros(N),
+                   cov=numpy.zeros(N), p0=numpy.ones(N), p1=numpy.zeros(N),
+                   imean=numpy.zeros(N), icov=numpy.zeros(N))
+        # gmvs are clipped to max(iml); below min(iml) the loss is zero
+        gmvs_curve = numpy.piecewise(
+            gmvs, [gmvs > self.imls[-1]], [self.imls[-1], lambda x: x])
+        ok = gmvs_curve >= self.imls[0]  # indices over the minimum
+        p0, p1, mu, cov = self.interpolate_params(gmvs_curve[ok])
+        mean, var = zoib_moments(p0, p1, mu, cov)
+        dic['mean'][ok] = mean
+        dic['cov'][ok] = numpy.divide(
+            numpy.sqrt(var), mean, out=numpy.zeros_like(mean),
+            where=mean > 0)
+        dic['p0'][ok] = p0
+        dic['p1'][ok] = p1
+        dic['imean'][ok] = mu
+        dic['icov'][ok] = cov
+        return pandas.DataFrame(dic, gmf_df.sid)
+
+    def _variances(self, dic, losses_ok, ok):
+        # conditional variance of the loss val**2 * Var[Y] given the GMV,
+        # i.e. the same quantity returned by the BT distribution when
+        # sampling is off, independently from the sampled loss;
+        # it is zero for ignore_covs=true, which sets all the covs to 0
+        if not self.covs.any():
+            return numpy.zeros(len(losses_ok))
+        return (dic['val'][ok] * dic['mean'][ok] * dic['cov'][ok]) ** 2
+
+    def survival(self, loss_ratio, p0, p1, mu, cov):
+        """
+        :param loss_ratio: loss ratios x broadcastable with the parameters
+        :param p0: probabilities of Y = 0
+        :param p1: probabilities of Y = 1
+        :param mu: means of the interior Beta
+        :param cov: coefficients of variation of the interior Beta
+        :returns: P(Y > x) = p1 + pint * BetaSF(x) for 0 <= x < 1, 0 for x >= 1
+        """
+        x, p0, p1, mu, cov = numpy.broadcast_arrays(
+            F64(loss_ratio), p0, p1, mu, cov)
+        pint = 1. - p0 - p1
+        # interior survival; a Beta with cov = 0 is a step function
+        sf = F64(x < mu)
+        beta = (cov > 0) & (pint > PINT_MIN)
+        if beta.any():
+            alpha, bet = _alpha_beta(mu[beta], mu[beta] * cov[beta])
+            sf[beta] = stats.beta.sf(x[beta], alpha, bet)
+        res = numpy.where(x < 0, 1., p1 + pint * sf)
+        res[x == 0] = 1. - p0[x == 0]
+        res[x >= 1] = 0.
+        return res
+
+    @lru_cache()
+    def loss_ratio_exceedance_matrix(self, loss_ratios):
+        """
+        Compute the LREM (Loss Ratio Exceedance Matrix) with C rows
+        (one per loss ratio) and L columns (one per IML).
+        """
+        x = F64(loss_ratios)[:, None]  # shape (C, 1)
+        return self.survival(x, self.probs_zero, self.probs_one,
+                             self._mus, self._icovs)
+
+    def strictly_increasing(self):
+        """
+        :returns:
+          a new vulnerability function that is strictly increasing in
+          the overall mean, removing the IMLs where it is constant
+        """
+        mlrs = self.mean_loss_ratios
+        idxs = [0] + [i for i in range(1, len(mlrs)) if mlrs[i] != mlrs[i-1]]
+        if len(idxs) == 1:
+            raise ValueError(f'The mean loss ratios for {self.id}'
+                             ' are constant!')
+        return self.__class__(
+            self.id, self.imt, self.imls[idxs], self.interior_means[idxs],
+            self.interior_covs[idxs], self.probs_zero[idxs],
+            self.probs_one[idxs])
+
+    def __getstate__(self):
+        return (self.id, self.imt, self.imls, self.mean_loss_ratios,
+                self.covs, self.distribution_name, self.retro,
+                self.interior_means, self.interior_covs, self.probs_zero,
+                self.probs_one)
+
+    def __setstate__(self, state):
+        (self.id, self.imt, self.imls, self.mean_loss_ratios, self.covs,
+         self.distribution_name, self.retro, self.interior_means,
+         self.interior_covs, self.probs_zero, self.probs_one) = state
+        self.init()
+
+    def __repr__(self):
+        return '<VulnerabilityFunctionWithZOIB(%s, %s)>' % (
+            self.id, self.imt)
 
 
 # this is meant to be instantiated by riskmodels.get_risk_functions
@@ -896,6 +1153,82 @@ class MultiEventRNG(object):
             out[start:stop] = self.rng[eid].beta(
                 alpha[start:stop], beta[start:stop])
         res[ok] = out
+        return res
+
+    def zoib(self, eids, p0, p1, means, covs):
+        """
+        :param eids: event IDs
+        :param p0: probabilities of a loss ratio exactly 0
+        :param p1: probabilities of a loss ratio exactly 1
+        :param means: means of the interior Beta
+        :param covs: coefficients of variation of the interior Beta
+        :returns: array of floats following the zero-one-inflated Beta
+
+        Without asset correlation for each row a uniform number u is drawn
+        from the generator of the event; the loss ratio is 0 if u < p0,
+        1 if u < p0 + p1, otherwise it is drawn from the interior Beta
+        (the mean if cov == 0). With asset correlation see `_zoib_correl`.
+
+        >>> rng = MultiEventRNG(master_seed=42, eids=[1])
+        >>> eids = numpy.array([1] * 4)
+        >>> p0 = numpy.array([1., 0., .2, .2])
+        >>> p1 = numpy.array([0., 1., .1, .1])
+        >>> rng.zoib(eids, p0, p1, means=numpy.array([.5] * 4),
+        ...          covs=numpy.array([.1, .1, 0., .1]))
+        array([0.        , 1.        , 0.5       , 0.41138846])
+        """
+        res = numpy.zeros(len(eids))
+        if len(eids) == 0:
+            return res
+        if self.asset_correlation:
+            return self._zoib_correl(eids, p0, p1, means, covs)
+        u = numpy.empty(len(eids))
+        for eid, start, stop in performance.idx_start_stop(eids):
+            u[start:stop] = self.rng[eid].random(stop - start)
+        res[(u >= p0) & (u < p0 + p1)] = 1.
+        inner = u >= p0 + p1
+        res[inner] = means[inner]
+        ok = inner & (covs > 0) & (means > 0)
+        if ok.any():
+            alpha, beta = _alpha_beta(means[ok], means[ok] * covs[ok])
+            out = numpy.empty(len(alpha))
+            # to speedup the calculation we group by event
+            for eid, start, stop in performance.idx_start_stop(eids[ok]):
+                out[start:stop] = self.rng[eid].beta(
+                    alpha[start:stop], beta[start:stop])
+            res[ok] = out
+        return res
+
+    def _zoib_correl(self, eids, p0, p1, means, covs):
+        """
+        Full asset correlation: a single uniform number u per event, shared
+        by all the rows of the event, is converted into a loss ratio with
+        the quantile function of the ZOIB, i.e. 0 if u < p0, 1 if
+        u >= 1 - p1, otherwise the quantile (u - p0) / pint of the interior
+        Beta; the loss ratios of the same event are then comonotonic.
+
+        >>> rng = MultiEventRNG(master_seed=42, eids=[1], asset_correlation=1)
+        >>> eids = numpy.array([1] * 3)
+        >>> p0 = numpy.array([.5, .2, .2])
+        >>> p1 = numpy.array([0., .2, .2])
+        >>> rng.zoib(eids, p0, p1, means=numpy.array([.2, .2, .2]),
+        ...          covs=numpy.array([.3, .3, 0.]))
+        array([0.        , 0.10869186, 0.2       ])
+        """
+        # NB: as for the lognormal distribution the random number is
+        # shared only by the rows passed in the same call
+        uniq, inv = numpy.unique(eids, return_inverse=True)
+        u = numpy.array([self.rng[eid].random() for eid in uniq])[inv]
+        res = numpy.zeros(len(eids))
+        res[u >= 1. - p1] = 1.
+        inner = (u >= p0) & (u < 1. - p1)
+        res[inner] = means[inner]
+        ok = inner & (covs > 0) & (means > 0)
+        if ok.any():
+            alpha, beta = _alpha_beta(means[ok], means[ok] * covs[ok])
+            pint = 1. - p0[ok] - p1[ok]
+            v = numpy.clip((u[ok] - p0[ok]) / pint, 0., 1.)
+            res[ok] = stats.beta.ppf(v, alpha, beta)
         return res
 
     def discrete_dmg_dist(self, eids, fractions, numbers):

@@ -23,6 +23,8 @@ import toml
 import numpy
 import pandas
 import matplotlib.pyplot as plt
+from scipy import stats
+from openquake.baselib import hdf5
 from openquake.risklib import riskmodels, scientific
 
 PLOTTING = False
@@ -799,3 +801,241 @@ class RiskComputerTestCase(unittest.TestCase):
         dd1 = dd5[0, 0, 1, 0, 1:]
         aac(dd0, [10, 8, 4, 0])
         aac(dd1, [31, 14, 3, 0], atol=1e-8)
+
+
+def zoib_gmf_df(gmvs, eids=None):
+    eids = numpy.arange(len(gmvs)) if eids is None else eids
+    return pandas.DataFrame(
+        dict(eid=eids, PGA=gmvs, sid=numpy.zeros(len(gmvs), int)))
+
+
+class ZOIBVulnerabilityTestCase(unittest.TestCase):
+    IMLS = [0.1, 0.2, 0.4]
+    MUS = [0.1, 0.3, 0.5]
+    COVS = [0.5, 0.4, 0.3]
+    P0 = [0.6, 0.3, 0.1]
+    P1 = [0.0, 0.1, 0.3]
+    N = 200_000  # number of samples
+    Z = 4  # number of standard errors
+
+    def make(self, mus=None, covs=None, p0=None, p1=None, imls=None):
+        vf = scientific.VulnerabilityFunctionWithZOIB(
+            'vf', 'PGA', imls or self.IMLS, mus or self.MUS,
+            covs or self.COVS, self.P0 if p0 is None else p0,
+            self.P1 if p1 is None else p1)
+        vf.init()
+        return vf
+
+    def sample(self, vf, gmv, seed=42, nevents=20, correl=0, N=None):
+        # returns N samples of the loss ratio at the given GMV, including
+        # the zeros, by using `nevents` per-event generators
+        eids = numpy.repeat(numpy.arange(nevents), (N or self.N) // nevents)
+        df = vf.interpolate(zoib_gmf_df(numpy.full(len(eids), gmv), eids),
+                            'PGA')
+        dic = {col: df[col].to_numpy() for col in df.columns}
+        rng = scientific.MultiEventRNG(seed, numpy.arange(nevents), correl)
+        return vf.sampler.get_losses(rng, dict(dic, val=1.), True)
+
+    def check_marginals(self, ys, p0, p1, mu, cov):
+        # the shares of exact 0 and 1 and the interior moments must be
+        # consistent with the ZOIB parameters within Z standard errors
+        N = len(ys)
+        for share, p in [((ys == 0).mean(), p0), ((ys == 1).mean(), p1)]:
+            se = numpy.sqrt(p * (1 - p) / N)
+            self.assertLess(abs(share - p), self.Z * se)
+        inner = ys[(ys > 0) & (ys < 1)]
+        n = len(inner)
+        a, b = scientific._alpha_beta(mu, mu * cov)
+        sig2 = (mu * cov) ** 2
+        kurt = stats.beta(a, b).stats(moments='k')  # excess kurtosis
+        self.assertLess(abs(inner.mean() - mu),
+                        self.Z * numpy.sqrt(sig2 / n))
+        self.assertLess(abs(inner.var() - sig2),
+                        self.Z * sig2 * numpy.sqrt((kurt + 2) / n))
+
+    def test_interpolation(self):
+        vf = self.make()
+        gmvs = numpy.array([0.05, 0.1, 0.15, 0.3, 0.4, 0.8])
+        df = vf.interpolate(zoib_gmf_df(gmvs), 'PGA')
+        # below the first IML the loss is zero
+        aac(df.p0, [1, .6, .45, .2, .1, .1])
+        aac(df.p1, [0, 0, .05, .2, .3, .3])
+        aac(df.imean, [0, .1, .2, .4, .5, .5])
+        aac(df.icov, [0, .5, .45, .35, .3, .3])
+        pint = 1 - df.p0 - df.p1
+        mean = df.p1 + pint * df.imean
+        aac(df['mean'], mean)
+        # NB: between the IMLs this is not the linear interpolation of
+        # the overall means, i.e. 0.19 instead of 0.15 for gmv=0.15
+        aac(df['mean'], [0, .04, .15, .44, .6, .6])
+        # the overall mean at the IMLs is the stored one
+        aac(df['mean'].to_numpy()[[1, 4]], vf.mean_loss_ratios[[0, 2]])
+
+    def test_moments(self):
+        vf = self.make()
+        for p0, p1, mu, cov, mean, cov_ in zip(
+                vf.probs_zero, vf.probs_one, vf.interior_means,
+                vf.interior_covs, vf.mean_loss_ratios, vf.covs):
+            # compute the moments from scipy
+            a, b = scientific._alpha_beta(mu, mu * cov)
+            beta = stats.beta(a, b)
+            pint = 1 - p0 - p1
+            m1 = p1 + pint * beta.moment(1)
+            m2 = p1 + pint * beta.moment(2)
+            aac(mean, m1)
+            aac(cov_, numpy.sqrt(m2 - m1 ** 2) / m1)
+        m, v = scientific.zoib_moments(.2, .1, .5, .2)
+        aac([m, v], [.45, .1 + .7 * (.25 + .01) - .45 ** 2])
+
+    def test_sampling(self):
+        vf = self.make()
+        gmv = 0.3
+        [p0, p1, mu, cov] = [x[0] for x in vf.interpolate_params([gmv])]
+        ys = self.sample(vf, gmv)
+        # reproducible for a fixed master seed, different otherwise
+        aac(ys, self.sample(vf, gmv))
+        self.assertFalse(numpy.allclose(ys, self.sample(vf, gmv, seed=43)))
+        self.check_marginals(ys, p0, p1, mu, cov)
+
+    def test_correlated_sampling(self):
+        vf = self.make()
+        gmv = 0.3
+        params = [x[0] for x in vf.interpolate_params([gmv])]
+        # with full correlation the rows of an event share the loss ratio
+        ys = self.sample(vf, gmv, nevents=2000, correl=1, N=20000)
+        aac(ys, self.sample(vf, gmv, nevents=2000, correl=1, N=20000))
+        ys = ys.reshape(2000, 10)
+        aac(ys, ys[:, [0]] * numpy.ones(10))
+        # but the marginal distribution is the same, one row per event
+        ys = self.sample(vf, gmv, nevents=20000, correl=1, N=20000)
+        self.check_marginals(ys, *params)
+
+    def test_correlated_comonotonic(self):
+        # asset A is less vulnerable than asset B at every loss ratio,
+        # i.e. F_A(x) >= F_B(x); with correlation then Y_A <= Y_B
+        E = 5000
+        eids = numpy.repeat(numpy.arange(E), 2)
+        p0 = numpy.tile([.5, .2], E)
+        p1 = numpy.tile([0., .2], E)
+        mus = numpy.full(2 * E, .2)
+        covs = numpy.full(2 * E, .3)
+        rng = scientific.MultiEventRNG(42, numpy.arange(E), 1)
+        ya, yb = rng.zoib(eids, p0, p1, mus, covs).reshape(E, 2).T
+        self.assertTrue((ya <= yb).all())
+        self.assertGreater(stats.spearmanr(ya, yb).statistic, .9)
+        # without correlation the order is random
+        rng = scientific.MultiEventRNG(42, numpy.arange(E), 0)
+        ya, yb = rng.zoib(eids, p0, p1, mus, covs).reshape(E, 2).T
+        self.assertFalse((ya <= yb).all())
+        self.assertLess(abs(stats.spearmanr(ya, yb).statistic), .05)
+
+    def test_degenerate(self):
+        imls = [0.1, 0.4]
+        # p0 = 1, all zero
+        vf = self.make([.5, .5], [.1, .1], [1., 1.], [0., 0.], imls)
+        self.assertEqual(vf.covs.tolist(), [0, 0])
+        aac(self.sample(vf, .2), 0)
+        # p1 = 1, all ones
+        vf = self.make([.5, .5], [.1, .1], [0., 0.], [1., 1.], imls)
+        aac(self.sample(vf, .2), 1)
+        # pint = 0, only zeros and ones
+        vf = self.make([.5, .5], [.1, .1], [.4, .4], [.6, .6], imls)
+        ys = self.sample(vf, .2)
+        self.assertEqual(set(numpy.unique(ys)), {0., 1.})
+        aac(vf.mean_loss_ratios, .6)
+        aac(vf.covs, numpy.sqrt(.6 * .4) / .6)
+        # interior cov = 0, the interior is exactly mu
+        vf = self.make([.3, .3], [0., 0.], [.2, .2], [.1, .1], imls)
+        ys = self.sample(vf, .2)
+        self.assertEqual(set(numpy.unique(ys)), {0., .3, 1.})
+
+    def test_survival(self):
+        vf = self.make()
+        lrs = (0., .05, .3, .6, .999, 1.)
+        lrem = vf.loss_ratio_exceedance_matrix(lrs)
+        self.assertEqual(lrem.shape, (6, 3))
+        for col, (p0, p1, mu, cov) in enumerate(zip(
+                vf.probs_zero, vf.probs_one, vf.interior_means,
+                vf.interior_covs)):
+            pint = 1 - p0 - p1
+            sf = stats.beta.sf(lrs, *scientific._alpha_beta(mu, mu * cov))
+            expected = p1 + pint * sf
+            expected[0] = 1 - p0  # P(Y > 0)
+            expected[-1] = 0  # P(Y > 1)
+            aac(lrem[:, col], expected)
+        # interior cov = 0 is a step function at mu
+        vf = self.make([.3, .3], [0., 0.], [.2, .2], [.1, .1], [.1, .4])
+        aac(vf.loss_ratio_exceedance_matrix((0, .29, .3, .5, 1))[:, 0],
+            [.8, .8, .1, .1, 0])
+
+    def test_equivalent_to_beta(self):
+        # with p0 = p1 = 0 the ZOIB is the BT distribution
+        zoib = self.make(p0=[0, 0, 0], p1=[0, 0, 0])
+        beta = scientific.VulnerabilityFunction(
+            'vf', 'PGA', self.IMLS, self.MUS, self.COVS, 'BT')
+        beta.init()
+        aac(zoib.mean_loss_ratios, beta.mean_loss_ratios)
+        aac(zoib.covs, beta.covs)
+        lrs = tuple(beta.mean_loss_ratios_with_steps(3))
+        self.assertEqual(lrs, tuple(zoib.mean_loss_ratios_with_steps(3)))
+        aac(zoib.loss_ratio_exceedance_matrix(lrs),
+            beta.loss_ratio_exceedance_matrix(lrs), atol=1e-12)
+        gmvs = numpy.array([0.05, 0.15, 0.3, 0.8])
+        zdf = zoib.interpolate(zoib_gmf_df(gmvs), 'PGA')
+        bdf = beta.interpolate(zoib_gmf_df(gmvs), 'PGA')
+        aac(zdf['mean'], bdf['mean'])
+        aac(zdf['cov'], bdf['cov'])
+        # same distribution in law
+        ys = self.sample(zoib, .15)
+        a, b = scientific._alpha_beta(.2, .2 * .45)
+        self.assertGreater(stats.kstest(ys, stats.beta(a, b).cdf).pvalue,
+                           1E-3)
+
+    def test_call(self):
+        vf = self.make()
+        gmvs = numpy.array([0.05, 0.15, 0.3, 0.8])
+        gmf_df = zoib_gmf_df(gmvs)
+        asset_df = pandas.DataFrame(dict(aid=[0], val=[100.]), [0])
+        # without sampling the losses are val * E[Y]
+        out = vf(asset_df, gmf_df, 'PGA')
+        df = vf.interpolate(gmf_df, 'PGA')
+        aac(out.loss, 100 * df['mean'][1:])
+        # the variance is val**2 * Var[Y]
+        pint = 1 - df.p0 - df.p1
+        m2 = df.p1 + pint * df.imean ** 2 * (1 + df.icov ** 2)
+        aac(out.variance, 100 ** 2 * (m2 - df['mean'] ** 2)[1:])
+        rng = scientific.MultiEventRNG(42, gmf_df.eid)
+        out = vf(asset_df, gmf_df, 'PGA', rng)
+        self.assertEqual(len(out), 2)  # the other losses are zero
+        # all covs set to zero (ignore_covs): deterministic losses
+        vf.covs = numpy.zeros_like(vf.covs)
+        vf.init()
+        out = vf(asset_df, gmf_df, 'PGA', rng)
+        aac(out.loss, 100 * df['mean'][1:])
+        aac(out.variance, 0)
+
+    def test_strictly_increasing(self):
+        vf = self.make([.1, .1, .3], [.5, .5, .4], [.6, .6, .1],
+                       [0, 0, .3], [.1, .2, .4])
+        new = vf.strictly_increasing()
+        aac(new.imls, [.1, .4])
+        aac(new.probs_zero, [.6, .1])
+        aac(new.mean_loss_ratios, vf.mean_loss_ratios[[0, 2]])
+
+    def test_pickle_and_json(self):
+        vf = self.make()
+        gmf_df = zoib_gmf_df(numpy.array([0.05, 0.15, 0.3, 0.8]))
+        expected = vf.interpolate(gmf_df, 'PGA')
+        new = pickle.loads(pickle.dumps(vf))
+        pandas.testing.assert_frame_equal(
+            new.interpolate(gmf_df, 'PGA'), expected)
+        for attr in ('imls', 'mean_loss_ratios', 'covs', 'interior_means',
+                     'interior_covs', 'probs_zero', 'probs_one'):
+            aac(getattr(new, attr), getattr(vf, attr))
+        # the datastore stores the risk functions in JSON format
+        new = hdf5.json_to_obj(hdf5.obj_to_json(vf))
+        new.init()
+        pandas.testing.assert_frame_equal(
+            new.interpolate(gmf_df, 'PGA'), expected)
+        aac(new.loss_ratio_exceedance_matrix((0, .5, 1)),
+            vf.loss_ratio_exceedance_matrix((0, .5, 1)))
