@@ -105,6 +105,21 @@ def build_vf_node(vf):
         {'id': vf.id, 'dist': vf.distribution_name}, nodes=nodes)
 
 
+@obj_to_node.add('VulnerabilityFunctionWithZOIB')
+def build_zoib_node(vf):
+    """
+    Convert a VulnerabilityFunctionWithZOIB object into a Node suitable
+    for XML conversion; meanLRs and covLRs are the interior parameters.
+    """
+    nodes = [Node('imls', {'imt': vf.imt}, vf.imls),
+             Node('meanLRs', {}, vf.interior_means),
+             Node('covLRs', {}, vf.interior_covs),
+             Node('probZero', {}, vf.probs_zero),
+             Node('probOne', {}, vf.probs_one)]
+    return Node('vulnerabilityFunction', {'id': vf.id, 'dist': 'ZOIB'},
+                nodes=nodes)
+
+
 def group_by_lt(funclist):
     """
     Converts a list of objects with attribute .loss_type into a dictionary

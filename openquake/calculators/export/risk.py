@@ -785,10 +785,22 @@ def convert_df_to_vulnerability(loss_type, df):
                                     "lossCategory": loss_type})
     descr = N('description', {}, f"{loss_type} vulnerability model")
     root.append(descr)
+    zkey = 'openquake.risklib.scientific.VulnerabilityFunctionWithZOIB'
     for riskfunc in df.riskfunc:
         dic = json.loads(riskfunc)
         key = 'openquake.risklib.scientific.VulnerabilityFunction'
-        if key not in dic:
+        if zkey in dic:  # the meanLRs and covLRs of the interior Beta
+            rfunc = dic[zkey]
+            vfunc = N('vulnerabilityFunction',
+                      {'id': rfunc['id'], 'dist': 'ZOIB'})
+            vfunc.append(N('imls', {'imt': rfunc['imt']}, rfunc['imls']))
+            vfunc.append(N('meanLRs', {}, rfunc['interior_means']))
+            vfunc.append(N('covLRs', {}, rfunc['interior_covs']))
+            vfunc.append(N('probZero', {}, rfunc['probs_zero']))
+            vfunc.append(N('probOne', {}, rfunc['probs_one']))
+            root.append(vfunc)
+            continue
+        elif key not in dic:
             # Skip non-vulnerability functions (e.g. FragilityFunctionList)
             continue
         rfunc = dic[key]
