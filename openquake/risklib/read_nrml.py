@@ -123,6 +123,8 @@ def get_vulnerability_functions_05(node, fname):
             vmodel[imt, vf_id] = (
                 scientific.VulnerabilityFunctionWithPMF(
                     vf_id, imt, imls, F64(loss_ratios), all_probs))
+        elif vfun['dist'] == 'ZOIB':
+            vmodel[imt, vf_id] = get_zoib(vfun, imt, imls, fname)
         else:
             with context(fname, vfun):
                 loss_ratios = ~vfun.meanLRs
@@ -142,6 +144,37 @@ def get_vulnerability_functions_05(node, fname):
                     vf_id, imt, imls, F64(loss_ratios), coefficients,
                     vfun['dist'])
     return vmodel
+
+
+def get_zoib(vfun, imt, imls, fname):
+    """
+    :param vfun: a vulnerabilityFunction node with dist="ZOIB"
+    :param imt: intensity measure type
+    :param imls: intensity measure levels
+    :param fname: path of the vulnerability file
+    :returns: a VulnerabilityFunctionWithZOIB instance
+    """
+    rows = {}
+    for tag, what in [('meanLRs', 'loss ratios'), ('covLRs', 'coefficients'),
+                      ('probZero', 'probabilities of zero loss'),
+                      ('probOne', 'probabilities of total loss')]:
+        nodes = list(vfun.getnodes(tag))
+        if len(nodes) != 1:
+            raise InvalidFile(
+                'Expected one <%s> in the ZOIB vulnerability function %s, '
+                'found %d: %s, line %d' % (tag, vfun['id'], len(nodes),
+                                           fname, vfun.lineno))
+        [node] = nodes
+        with context(fname, node):
+            rows[tag] = ~node
+        if len(rows[tag]) != len(imls):
+            raise InvalidFile(
+                'There are %d %s, but %d imls: %s, line %d' %
+                (len(rows[tag]), what, len(imls), fname, node.lineno))
+    with context(fname, vfun):
+        return scientific.VulnerabilityFunctionWithZOIB(
+            vfun['id'], imt, imls, F64(rows['meanLRs']), rows['covLRs'],
+            rows['probZero'], rows['probOne'])
 
 
 # ########################### fragility ############################### #
@@ -406,9 +439,11 @@ def update_validators():
         'lossRatio': valid.positivefloats,
         'coefficientsVariation': valid.positivefloats,
         'probabilisticDistribution': valid.Choice('LN', 'BT'),
-        'dist': valid.Choice('LN', 'BT', 'PM'),
+        'dist': valid.Choice('LN', 'BT', 'PM', 'ZOIB'),
         'meanLRs': valid.positivefloats,
         'covLRs': valid.positivefloats,
+        'probZero': valid.probabilities,
+        'probOne': valid.probabilities,
         'format': valid.ChoiceCI('discrete', 'continuous'),
         'mean': valid.positivefloat,
         'stddev': valid.positivefloat,

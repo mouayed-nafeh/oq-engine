@@ -17,8 +17,12 @@
 # along with OpenQuake.  If not, see <http://www.gnu.org/licenses/>.
 
 import unittest
+import numpy
+from openquake.baselib import InvalidFile
 from openquake.baselib.general import gettemp
 from openquake.hazardlib import nrml
+
+aac = numpy.testing.assert_allclose
 
 
 class VulnerabilityFunctionTestCase(unittest.TestCase):
@@ -102,3 +106,102 @@ class VulnerabilityFunctionTestCase(unittest.TestCase):
             nrml.to_python(fname)
         self.assertIn('Duplicated vulnerabilityFunctionID: CR-PC_LWAL-DNO_H1',
                       str(ctx.exception))
+
+
+ZOIB_ROWS = dict(
+    imls='0.05 0.20 0.50 1.00',
+    meanLRs='0.004 0.06 0.21 0.38',
+    covLRs='0.9 1.1 0.8 0.6',
+    probZero='0.98 0.45 0.08 0.01',
+    probOne='0.00 0.03 0.22 0.61')
+
+
+def zoib_file(dist='ZOIB', **rows):
+    # build a vulnerability file with a single ZOIB function; passing
+    # a row equal to None removes it
+    dic = ZOIB_ROWS.copy()
+    dic.update(rows)
+    lines = []
+    for tag, value in dic.items():
+        if value is None:
+            continue
+        attr = ' imt="PGA"' if tag == 'imls' else ''
+        lines.append('<%s%s>%s</%s>' % (tag, attr, value, tag))
+    return gettemp('''\
+<?xml version="1.0" encoding="UTF-8"?>
+<nrml xmlns="http://openquake.org/xmlns/nrml/0.5">
+<vulnerabilityModel id="vm" assetCategory="buildings"
+                    lossCategory="structural">
+<description>ZOIB model</description>
+<vulnerabilityFunction id="CR/LFM/CDL+ERM/H:2/RES" dist="%s">
+%s
+</vulnerabilityFunction>
+</vulnerabilityModel>
+</nrml>''' % (dist, '\n'.join(lines)), suffix='.xml')
+
+
+class ZOIBVulnerabilityTestCase(unittest.TestCase):
+    def assertInvalid(self, msg, exc=ValueError, **rows):
+        dist = rows.pop('dist', 'ZOIB')
+        with self.assertRaises(exc) as ctx:
+            nrml.to_python(zoib_file(dist, **rows))
+        self.assertIn(msg, str(ctx.exception))
+        return str(ctx.exception)
+
+    def test_valid(self):
+        vmodel = nrml.to_python(zoib_file())
+        vf = vmodel['PGA', 'CR/LFM/CDL+ERM/H:2/RES']
+        self.assertEqual(vf.distribution_name, 'ZOIB')
+        aac(vf.imls, [0.05, 0.20, 0.50, 1.00])
+        aac(vf.interior_means, [0.004, 0.06, 0.21, 0.38])
+        aac(vf.interior_covs, [0.9, 1.1, 0.8, 0.6])
+        aac(vf.probs_zero, [0.98, 0.45, 0.08, 0.01])
+        aac(vf.probs_one, [0.00, 0.03, 0.22, 0.61])
+        # overall mean E[Y] = p1 + (1 - p0 - p1) * mu
+        aac(vf.mean_loss_ratios, [8.0e-05, 0.0612, 0.367, 0.7544])
+
+    def test_sum_above_one(self):
+        self.assertInvalid('probZero + probOne > 1 at IML=0.5',
+                           probZero='0.98 0.45 0.80 0.01')
+
+    def test_negative_probability(self):
+        self.assertInvalid('is smaller than the min',
+                           probOne='0.00 -0.03 0.22 0.61')
+
+    def test_bad_cov(self):
+        # with mu = 0.06 the maximum cov is sqrt(1 / 0.06 - 1) = 3.958
+        msg = self.assertInvalid('does not satisfy the requirement',
+                                 covLRs='0.9 4.0 0.8 0.6')
+        self.assertIn('at IML=0.2', msg)
+        self.assertIn('line', msg)
+
+    def test_bad_mean(self):
+        self.assertInvalid('the meanLRs must be in the range (0, 1)',
+                           meanLRs='0.004 0.0 0.21 0.38')
+        self.assertInvalid('the meanLRs must be in the range (0, 1)',
+                           meanLRs='0.004 0.06 0.21 1.2')
+
+    def test_mean_ignored_without_interior(self):
+        # where probZero + probOne = 1 meanLRs and covLRs are ignored
+        vmodel = nrml.to_python(zoib_file(
+            meanLRs='0 0.06 0.21 0.38', covLRs='7 1.1 0.8 0.6',
+            probZero='1 0.45 0.08 0.01'))
+        [vf] = vmodel.values()
+        aac(vf.mean_loss_ratios[0], 0.)
+
+    def test_wrong_number_of_values(self):
+        for tag, what in [('meanLRs', 'loss ratios'),
+                          ('covLRs', 'coefficients'),
+                          ('probZero', 'probabilities of zero loss'),
+                          ('probOne', 'probabilities of total loss')]:
+            values = ZOIB_ROWS[tag].rsplit(' ', 1)[0]  # remove one value
+            self.assertInvalid('There are 3 %s, but 4 imls' % what,
+                               InvalidFile, **{tag: values})
+
+    def test_missing_row(self):
+        for tag in ['meanLRs', 'covLRs', 'probZero', 'probOne']:
+            self.assertInvalid('Expected one <%s> in the ZOIB' % tag,
+                               InvalidFile, **{tag: None})
+
+    def test_unknown_dist(self):
+        self.assertInvalid("Got 'ZOB', expected LN|BT|PM|ZOIB", dist='ZOB')
