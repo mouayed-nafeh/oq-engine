@@ -1,3 +1,10 @@
+  [Al Mouayed Bellah Nafeh]
+  * Added a zero-one-inflated Beta distribution (dist="ZOIB") for the
+    vulnerability functions, with rows probZero and probOne for the point
+    masses at loss ratios 0 and 1; it is supported by the scenario, event
+    based and classical risk calculators, including asset_correlation=1;
+    see the new demo ScenarioRiskZOIB
+
   [Michele Simionato]
   * Extended the ps_grid_spacing approximation to the case of few sites
 
